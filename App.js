@@ -1,6 +1,6 @@
 // Cachi Store - main app (home, shop, designer, cart, checkout, admin). No customer login.
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, Image, Pressable, ScrollView, TextInput, StyleSheet, Alert, Platform, Modal, Linking, ImageBackground } from 'react-native';
+import { View, Text, Image, Pressable, ScrollView, TextInput, StyleSheet, Alert, Platform, Modal, Linking, ImageBackground, Share } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import CustomCaseScreen, { supabase } from './CustomCaseScreen';
 
@@ -9,6 +9,22 @@ const notify = (t, m) => (Platform.OS === 'web' ? window.alert(`${t}: ${m}`) : A
 const endsIn = ts => {
   const h = Math.max(0, Math.round((new Date(ts) - new Date()) / 36e5));
   return h >= 24 ? `${Math.round(h / 24)} day(s) left` : `${Math.max(h, 1)} hour(s) left`;
+};
+const STATUS_COLOR = { pending: '#FF6B4A', confirmed: '#3b82f6', printing: '#8b5cf6', shipped: '#0d9488', delivered: '#16a34a' };
+const waLink = ph => { let d = (ph || '').replace(/\D/g, ''); if (d.length === 8) d = '216' + d; return `https://wa.me/${d}`; };
+const confirmAsk = (msg, onYes) => {
+  if (Platform.OS === 'web') { if (window.confirm(msg)) onYes(); }
+  else Alert.alert('Are you sure?', msg, [{ text: 'Cancel', style: 'cancel' }, { text: 'Yes', style: 'destructive', onPress: onYes }]);
+};
+// share a design or product: phone share sheet, or WhatsApp on a computer
+const shareIt = async (title, url) => {
+  const link = url || (Platform.OS === 'web' ? window.location.href : '');
+  const text = `${title} - Cachi Store`;
+  try {
+    if (Platform.OS !== 'web') await Share.share({ message: `${text} ${link}` });
+    else if (navigator.share) await navigator.share({ title: text, text, url: link });
+    else window.open(`https://wa.me/?text=${encodeURIComponent(`${text} ${link}`)}`, '_blank');
+  } catch (e) {}
 };
 const STATUSES = ['pending', 'confirmed', 'printing', 'shipped', 'delivered'];
 
@@ -284,6 +300,7 @@ function FeaturedModal({ d, onClose, onAdd }) {
       <Text style={{ color: ACC, fontWeight: '700', marginTop: 4 }}>⏳ {endsIn(d.featured_until)}</Text>
       <Text style={[s.price, { fontSize: 22, marginVertical: 8 }]}>{money(d.price)}</Text>
       <Btn label="Get this design" onPress={add} />
+      <Btn light label="Share this design" onPress={() => shareIt(`Community design for ${d.model}`, d.preview_url)} />
       <Btn light label="Close" onPress={onClose} />
     </PopUp>
   );
@@ -299,6 +316,7 @@ function ProductModal({ p, onClose, onAdd }) {
       <Text style={{ color: '#666' }}>{p.phone_models?.name}</Text>
       <Text style={[s.price, { fontSize: 22, marginVertical: 8 }]}>{money(p.price)}</Text>
       <Btn label="Add to cart" onPress={() => onAdd(cartItem(p))} />
+      <Btn light label="Share" onPress={() => shareIt(p.title, p.image_url)} />
       <Btn light label="Close" onPress={onClose} />
     </PopUp>
   );
@@ -339,6 +357,7 @@ function DesignViewer({ it, pass, onChanged, onClose }) {
           </View>
         </View>
       )}
+      <Btn light label="Share" onPress={() => shareIt(`Custom design for ${it.model}`, url)} />
       <Btn label="Open full size / download" onPress={() => Linking.openURL(url)} />
       <Btn light label="Close" onPress={onClose} />
     </PopUp>
@@ -396,11 +415,122 @@ function Checkout({ cart, onDone }) {
   );
 }
 
-function Admin() {
-  const [view, setView] = useState(null);
+function OrderCard({ o, onStatus, onView }) {
+  const next = STATUSES[STATUSES.indexOf(o.status) + 1];
+  const live = ts => ts && new Date(ts) > new Date();
+  return (
+    <View style={s.order}>
+      <View style={s.between}>
+        <Text style={{ fontWeight: '800' }}>#{o.id.slice(0, 8)} · {money(o.total)}</Text>
+        <Text style={[s.badge2, { backgroundColor: STATUS_COLOR[o.status] || '#999' }]}>{o.status}</Text>
+      </View>
+      <Text style={s.mut}>{new Date(o.created_at).toLocaleString()}</Text>
+      <Text style={{ fontWeight: '700' }}>{o.customer_name} · {o.phone}</Text>
+      <Text>{o.address}, {o.city}</Text>
+      <View style={s.row}>
+        <Pressable style={s.chip} onPress={() => Linking.openURL(`tel:${o.phone}`)}><Text>📞 Call</Text></Pressable>
+        <Pressable style={s.chip} onPress={() => Linking.openURL(waLink(o.phone))}><Text>💬 WhatsApp</Text></Pressable>
+      </View>
+      {(o.items || []).map((it, n) => (
+        <View key={n} style={s.line}>
+          {it.preview && <Pressable onPress={() => onView(it)}><Image source={{ uri: it.preview }} style={s.thumb} /></Pressable>}
+          <Text style={{ flex: 1 }}>
+            {live(it.featured_until) ? '⭐ ' : it.public_ok ? '🌍 ' : ''}{it.qty}x {it.title || 'Custom case (tap image)'} · {it.model}{it.text ? ` · "${it.text}"` : ''}
+          </Text>
+        </View>
+      ))}
+      {next && <Btn label={`Mark as ${next} →`} onPress={() => onStatus(o.id, next)} />}
+      <View style={s.row}>
+        {STATUSES.map(st => (
+          <Pressable key={st} onPress={() => onStatus(o.id, st)} style={[s.chip, o.status === st && s.chipOn]}>
+            <Text style={o.status === st && { color: '#fff' }}>{st}</Text>
+          </Pressable>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+function ProductsTab({ pass }) {
+  const [list, setList] = useState([]);
   const [adding, setAdding] = useState(false);
+  const load = async () => {
+    const { data, error } = await supabase.rpc('admin_products', { p_pass: pass });
+    if (error) notify('Error', error.message); else setList(data);
+  };
+  useEffect(() => { load(); }, []);
+  const del = p => confirmAsk(`Delete "${p.title}"?`, async () => {
+    const { data, error } = await supabase.rpc('admin_delete_product', { p_pass: pass, p_id: p.id });
+    if (error) return notify('Error', error.message);
+    if (data === 'hidden') notify('Hidden', 'This product is in past orders, so it was hidden from the shop instead of erased.');
+    load();
+  });
+  return (
+    <View>
+      <Btn label={adding ? 'Close form' : '＋ Add new product'} onPress={() => setAdding(x => !x)} />
+      {adding && <AddProduct pass={pass} onSaved={() => { setAdding(false); load(); }} />}
+      <Text style={[s.h2, { marginTop: 18 }]}>All products ({list.length})</Text>
+      {list.map(p => (
+        <View key={p.id} style={[s.order, !p.active && { opacity: 0.5 }]}>
+          <View style={s.line}>
+            {p.image_url ? <Image source={{ uri: p.image_url }} style={s.thumb} /> : <View style={[s.thumb, s.ph]}><Text>📱</Text></View>}
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontWeight: '700' }}>{p.title}</Text>
+              <Text style={s.mut}>{p.model} · {money(p.price)}{p.active ? '' : ' · hidden'}</Text>
+            </View>
+            {p.active && <Pressable style={s.chip} onPress={() => del(p)}><Text style={{ color: '#c0392b' }}>🗑 Delete</Text></Pressable>}
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+function EmailsTab({ pass }) {
+  const [d, setD] = useState({ emails: [], has_key: false });
+  const [email, setEmail] = useState('');
+  const [key, setKey] = useState('');
+  const load = async () => {
+    const { data, error } = await supabase.rpc('admin_emails_list', { p_pass: pass });
+    if (error) notify('Error', error.message); else setD(data);
+  };
+  useEffect(() => { load(); }, []);
+  const call = async (fn, args, ok) => {
+    const { error } = await supabase.rpc(fn, { p_pass: pass, ...args });
+    if (error) return notify('Error', error.message);
+    if (ok) notify('Done', ok);
+    load();
+  };
+  return (
+    <View>
+      <View style={s.order}>
+        <Text style={s.h2}>Order emails</Text>
+        <Text style={s.mut}>Every new order sends an email to these addresses.</Text>
+        {d.emails.map(e => (
+          <View key={e.id} style={s.line}>
+            <Text style={{ flex: 1 }}>{e.email}</Text>
+            <Pressable style={s.chip} onPress={() => confirmAsk(`Remove ${e.email}?`, () => call('admin_email_delete', { p_id: e.id }))}><Text>Remove</Text></Pressable>
+          </View>
+        ))}
+        <TextInput style={[s.input, { marginTop: 10 }]} placeholder="name@example.com" autoCapitalize="none" keyboardType="email-address" value={email} onChangeText={setEmail} />
+        <Btn label="Add email" disabled={!email.includes('@')} onPress={() => { call('admin_email_add', { p_email: email.trim() }); setEmail(''); }} />
+      </View>
+      <View style={s.order}>
+        <Text style={s.h2}>Email sending</Text>
+        <Text style={{ color: d.has_key ? '#16a34a' : '#c0392b', marginBottom: 8 }}>{d.has_key ? '✓ Resend API key saved' : '⚠ No API key yet, so no emails are sent'}</Text>
+        <TextInput style={s.input} placeholder="Resend API key (re_...)" secureTextEntry autoCapitalize="none" value={key} onChangeText={setKey} />
+        <Btn light label="Save key" disabled={!key} onPress={() => { call('admin_set_setting', { p_key: 'resend_api_key', p_value: key.trim() }, 'Key saved.'); setKey(''); }} />
+        <Btn label="Send a test email" onPress={() => call('admin_test_email', {}, 'Test email sent. It can take a minute to arrive.')} />
+      </View>
+    </View>
+  );
+}
+
+function Admin() {
   const [pass, setPass] = useState('');
   const [orders, setOrders] = useState(null);
+  const [tab, setTab] = useState('new');
+  const [view, setView] = useState(null);
 
   const load = async (p = pass) => {
     const { data, error } = await supabase.rpc('admin_orders', { p_pass: p });
@@ -419,36 +549,31 @@ function Admin() {
       <Btn label="Enter" onPress={() => load()} />
     </View>
   );
+
+  const fresh = orders.filter(o => o.status !== 'delivered');
+  const done = orders.filter(o => o.status === 'delivered');
+  const tabs = [['dash', '📊 Dashboard'], ['new', `🆕 New orders (${fresh.length})`], ['done', `✅ Delivered (${done.length})`], ['products', '🛍 Products'], ['emails', '✉️ Emails']];
+  const list = l => (l.length ? l.map(o => <OrderCard key={o.id} o={o} onStatus={setStatus} onView={setView} />) : <Text style={s.mut}>Nothing here yet.</Text>);
+
   return (
     <View>
-      <Text style={s.h1}>Dashboard</Text>
-      <Stats orders={orders} />
-      <Btn label={adding ? 'Close form' : '＋ Add new product'} onPress={() => setAdding(x => !x)} />
-      {adding && <AddProduct pass={pass} onSaved={() => setAdding(false)} />}
-      <Text style={[s.h1, { marginTop: 24 }]}>Orders ({orders.length})</Text>
+      <View style={s.between}>
+        <Text style={s.h1}>Admin</Text>
+        <Pressable onPress={() => load()}><Text style={s.link}>↻ Refresh</Text></Pressable>
+      </View>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 14, flexGrow: 0 }}>
+        {tabs.map(([k, l]) => (
+          <Pressable key={k} onPress={() => setTab(k)} style={[s.navItem, tab === k && s.navOn, { marginRight: 6 }]}>
+            <Text style={[s.link, tab === k && { color: '#fff' }]}>{l}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
       {view && <DesignViewer it={view} pass={pass} onChanged={() => load()} onClose={() => setView(null)} />}
-      {orders.map(o => (
-        <View key={o.id} style={s.order}>
-          <Text style={{ fontWeight: '700' }}>#{o.id.slice(0, 8)} · {money(o.total)} · {o.status}</Text>
-          <Text>{o.customer_name} · {o.phone}</Text>
-          <Text>{o.address}, {o.city}</Text>
-          {(o.items || []).map((it, n) => (
-            <View key={n} style={s.line}>
-              {it.preview && <Pressable onPress={() => setView(it)}><Image source={{ uri: it.preview }} style={s.thumb} /></Pressable>}
-              <Text style={{ flex: 1 }}>
-                {it.featured_until && new Date(it.featured_until) > new Date() ? '⭐ ' : it.public_ok ? '🌍 ' : ''}{it.qty}x {it.title || 'Custom case (tap image to open)'} · {it.model}{it.text ? ` · "${it.text}"` : ''}
-              </Text>
-            </View>
-          ))}
-          <View style={s.row}>
-            {STATUSES.map(st => (
-              <Pressable key={st} onPress={() => setStatus(o.id, st)} style={[s.chip, o.status === st && s.chipOn]}>
-                <Text style={o.status === st && { color: '#fff' }}>{st}</Text>
-              </Pressable>
-            ))}
-          </View>
-        </View>
-      ))}
+      {tab === 'dash' && <Stats orders={orders} />}
+      {tab === 'new' && list(fresh)}
+      {tab === 'done' && list(done)}
+      {tab === 'products' && <ProductsTab pass={pass} />}
+      {tab === 'emails' && <EmailsTab pass={pass} />}
     </View>
   );
 }
@@ -498,5 +623,8 @@ const s = StyleSheet.create({
   statBox: { flex: 1, minWidth: 140, backgroundColor: '#fff', borderRadius: 16, padding: 16, ...shadow },
   statNum: { fontSize: 26, fontWeight: '800', color: ACC },
   statLbl: { color: '#7a746a', marginTop: 2 },
+  between: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  badge2: { color: '#fff', fontWeight: '700', fontSize: 12, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, overflow: 'hidden' },
+  mut: { color: '#7a746a', marginBottom: 6 },
   footer: { textAlign: 'center', color: '#cdc7bc', marginTop: 40, fontSize: 12 },
 });
