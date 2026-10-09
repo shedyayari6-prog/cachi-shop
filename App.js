@@ -16,15 +16,26 @@ const confirmAsk = (msg, onYes) => {
   if (Platform.OS === 'web') { if (window.confirm(msg)) onYes(); }
   else Alert.alert('Are you sure?', msg, [{ text: 'Cancel', style: 'cancel' }, { text: 'Yes', style: 'destructive', onPress: onYes }]);
 };
-// share a design or product: phone share sheet, or WhatsApp on a computer
+// Share a design or product using a real URL.
 const shareIt = async (title, url) => {
   const link = url || (Platform.OS === 'web' ? window.location.href : '');
   const text = `${title} - Cachi Store`;
   try {
-    if (Platform.OS !== 'web') await Share.share({ message: `${text} ${link}` });
-    else if (navigator.share) await navigator.share({ title: text, text, url: link });
-    else window.open(`https://wa.me/?text=${encodeURIComponent(`${text} ${link}`)}`, '_blank');
+    if (Platform.OS !== 'web') {
+      await Share.share({ message: `${text}\n${link}`, url: link });
+    } else if (navigator.share) {
+      await navigator.share({ title: text, text: `Check out ${title} on Cachi Store`, url: link });
+    } else if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(link);
+      window.alert('Product link copied to clipboard.');
+    } else {
+      window.prompt('Copy this product link:', link);
+    }
   } catch (e) {}
+};
+const productLink = id => {
+  if (Platform.OS !== 'web' || typeof window === 'undefined') return '';
+  return `${window.location.origin}/?product=${encodeURIComponent(id)}`;
 };
 const STATUSES = ['pending', 'confirmed', 'printing', 'shipped', 'delivered'];
 
@@ -34,6 +45,18 @@ export default function App() {
   const [orderId, setOrderId] = useState(null);
   const [selected, setSelected] = useState(null);
   const taps = useRef({ n: 0, t: null });
+  useEffect(() => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    const id = new URLSearchParams(window.location.search).get('product');
+    if (!id) return;
+    let active = true;
+    supabase.from('products').select('*, phone_models(name)').eq('id', id).maybeSingle()
+      .then(({ data }) => {
+        if (active && data) { setSelected(data); setPage('shop'); }
+      });
+    return () => { active = false; };
+  }, []);
+
   // hidden admin door: tap the footer text 5 times
   const secretTap = () => {
     clearTimeout(taps.current.t);
@@ -316,9 +339,18 @@ function ProductModal({ p, onClose, onAdd }) {
       <Text style={{ color: '#666' }}>{p.phone_models?.name}</Text>
       <Text style={[s.price, { fontSize: 22, marginVertical: 8 }]}>{money(p.price)}</Text>
       <Btn label="Add to cart" onPress={() => onAdd(cartItem(p))} />
-      <Btn light label="Share" onPress={() => shareIt(p.title, p.image_url)} />
+      <ShareButton label="Share product" onPress={() => shareIt(p.title, productLink(p.id))} />
       <Btn light label="Close" onPress={onClose} />
     </PopUp>
+  );
+}
+
+function ShareButton({ label, onPress }) {
+  return (
+    <Pressable onPress={onPress} style={s.shareBtn}>
+      <Text style={s.shareIcon}>↗</Text>
+      <Text style={s.shareBtnText}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -610,6 +642,9 @@ const s = StyleSheet.create({
   btn: { backgroundColor: ACC, borderRadius: 14, padding: 14, alignItems: 'center', marginTop: 8 },
   btnLight: { backgroundColor: '#fff', borderWidth: 1, borderColor: '#ddd' },
   btnText: { color: '#fff', fontWeight: '700', fontSize: 15 },
+  shareBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#fff', borderWidth: 1.5, borderColor: ACC, borderRadius: 999, paddingHorizontal: 18, paddingVertical: 11, marginTop: 8 },
+  shareIcon: { color: ACC, fontSize: 18, fontWeight: '800', lineHeight: 18 },
+  shareBtnText: { color: INK, fontWeight: '700', fontSize: 15 },
   line: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, borderBottomWidth: 1, borderColor: '#efe9df' },
   thumb: { width: 60, height: 60, borderRadius: 10, backgroundColor: '#F1EBE2' },
   qty: { width: 32, height: 32, borderRadius: 16, borderWidth: 1, borderColor: '#ccc', alignItems: 'center', justifyContent: 'center', backgroundColor: '#fff' },
